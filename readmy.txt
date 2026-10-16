@@ -1,0 +1,4 @@
+This program is used to find optimal distribution 
+items to promocodes and promocodes to customs limits.
+tools: Gemini AI
+Author: Vitaliy M.
