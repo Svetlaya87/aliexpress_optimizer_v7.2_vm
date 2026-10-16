@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AliExpress — оптимизатор закупки — версия 7.2</title>
+<style>
+body{font-family:Arial,sans-serif;margin:20px;background:#f5f5f5;color:#222}
+h1{font-size:22px} h2{font-size:18px;margin-top:24px}
+.note,#status,.result{background:#fff;border:1px solid #bbb;padding:10px;margin:10px 0}
+.note{background:#fffbe6}
+table{border-collapse:collapse;width:100%;background:#fff;margin:8px 0 12px}
+th,td{border:1px solid #bbb;padding:5px;text-align:left} th{background:#e9e9e9}.result td[rowspan]{vertical-align:middle}
+input{box-sizing:border-box;padding:5px;border:1px solid #aaa;width:100%}
+.money{width:110px}.qty{width:85px}.toolbar{margin:10px 0}.toolbar button{margin:0 6px 6px 0;padding:7px 12px}
+.right{text-align:right}.center{text-align:center}.small{font-size:12px;color:#555}.danger{color:#a00}.ok{color:#075b16}
+input.field-error{background:#ffd6d6!important} input.field-ignore{background:#e6e6e6!important} input.field-ok{background:#dcf5dc!important}.avail{min-width:52px;padding:5px 10px;border:1px solid #888;cursor:pointer}.avail.yes{background:#dcf5dc}.avail.no{background:#e6e6e6}.audit-ok{color:#075b16;font-weight:bold}.audit-error{color:#a00;font-weight:bold;white-space:pre-line}</style>
+</head>
+<body>
+<h1>AliExpress — оптимизатор закупки — версия 7.2</h1>
+<div class="note"><b>Тестовая версия 7.2.</b> Реализован согласованный алгоритм ранних отсечений, Top-5, импорт/экспорт Excel, итоговый контроль результатов и измерение времени расчёта. Последние введённые данные автоматически сохраняются в браузере.</div>
+
+<h2>1. Таможенный ориентир</h2>
+<table>
+<tr><th>Параметр</th><th>Значение</th><th>Информация</th></tr>
+<tr><td>Лимит, EUR</td><td><input id="eurLimit" class="money"></td><td rowspan="3"><button id="rateBtn">Обновить курс НБУ</button><div id="rateInfo" class="small"></div></td></tr>
+<tr><td>EUR → UAH</td><td><input id="eurRate" class="money"></td></tr>
+<tr><td>USD → UAH</td><td><input id="usdRate" class="money"></td></tr>
+<tr><td>Ориентир лимита, USD</td><td id="usdEq">—</td><td></td></tr>
+</table>
+
+<h2>2. Товары</h2><div class="toolbar"><button id="addProduct">Добавить товар</button></div>
+<table id="products"><thead><tr><th>Название</th><th>Текущая цена, $</th><th>Средняя цена, $</th><th>Мин.</th><th>Макс.</th><th>Экономия, $/шт.</th><th>Доступность</th><th></th></tr></thead><tbody></tbody></table>
+
+<h2>3. Промокоды</h2><div class="toolbar"><button id="addPromo">Добавить промокод</button></div>
+<table id="promos"><thead><tr><th>Название</th><th>Скидка, $</th><th>Минимум, $</th><th>Доступность</th><th></th></tr></thead><tbody></tbody></table>
+
+<h2>4. Таможенные лимиты</h2><div class="toolbar"><button id="addLimit">Добавить лимит</button></div>
+<table id="limits"><thead><tr><th>Название</th><th>Лимит, $</th><th>Использовано, $</th><th>Остаток, $</th><th>Доступность</th><th></th></tr></thead><tbody></tbody></table>
+
+<div class="toolbar"><button id="calculate"><b>Рассчитать</b></button><button id="stopCalc" style="display:none">Прервать расчёт</button><button id="importExcel">Импорт из Excel</button><button id="exportExcel">Экспорт в Excel</button><input id="excelFile" type="file" accept=".xml,application/xml,text/xml" style="display:none"><button id="clearSaved">Очистить сохранённые данные</button></div>
+<div id="progressWrap" style="display:none;background:#fff;border:1px solid #bbb;padding:8px;margin:10px 0">
+<div style="height:14px;border:1px solid #999;background:#eee"><div id="progressBar" style="height:100%;width:0%;background:#777"></div></div>
+<div id="progressText" class="small">Подготовка расчёта…</div><div id="calcTime" class="small">Время расчёта: 0,0 с</div></div>
+<div id="status">Готово.</div><div id="results"></div>
+
+
+<script id="projectState" type="text/javascript">window.__PROJECT_DATA__=null;</script>
+<script>
+(function(){
+"use strict";
+var KEY="aliexpress_optimizer_v5";
+var DEFAULT={
+ products:[{name:"Товар 1",price:"20",avg:"25",min:"1",max:"3",available:"да"},{name:"Товар 2",price:"10",avg:"12",min:"0",max:"4",available:"да"}],
+ promos:[{name:"Promo1",discount:"3",minSum:"25",available:"да"},{name:"Promo2",discount:"5",minSum:"45",available:"да"}],
+ limits:[{name:"Лимит 1",limit:"100",used:"0",available:"да"},{name:"Лимит 2",limit:"80",used:"0",available:"да"}],
+ eurLimit:"150",eurRate:"",usdRate:"",rateDate:""
+};
+var state=null,lastResults=[],calcStarted=0,calcTimer=null,lastCalcSeconds=null,lastCalcStatus="Нет расчёта";
+
+function clone(x){return JSON.parse(JSON.stringify(x))}
+function num(v){var s=String(v==null?"":v).trim().replace(/\s/g,"").replace(",",".");return s===""?NaN:Number(s)}
+function f2(n){return isFinite(n)?Number(n).toFixed(2):"—"}
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
+function save(){try{var v=JSON.stringify(state);localStorage.setItem(KEY,v);return localStorage.getItem(KEY)===v}catch(e){return false}}
+function normalizeState(){var i;if(!state.products)state.products=[];if(!state.promos)state.promos=[];if(!state.limits)state.limits=[];for(i=0;i<state.products.length;i++)if(state.products[i].available===undefined)state.products[i].available="да";for(i=0;i<state.promos.length;i++)state.promos[i].available=normAvail(state.promos[i].available);for(i=0;i<state.limits.length;i++)if(state.limits[i].available===undefined)state.limits[i].available="да"}
+function normAvail(v){v=String(v==null?"":v).trim().toLowerCase();return(v===""||v==="0"||v==="нет")?"нет":"да"}
+function availBtn(type,index,value){var v=normAvail(value);return '<button type="button" class="avail '+(v==="да"?'yes':'no')+'" data-toggle="'+type+'" data-i="'+index+'">'+v+'</button>'}
+function load(){
+ if(window.__PROJECT_DATA__){state=clone(window.__PROJECT_DATA__);normalizeState();save();return}
+ try{var x=localStorage.getItem(KEY);if(x){state=JSON.parse(x);normalizeState();return}}catch(e){}
+ state=clone(DEFAULT)
+ normalizeState();save()
+}
+function inp(value,type,index,field,cls){return '<input class="'+(cls||"")+'" value="'+esc(value)+'" data-type="'+type+'" data-index="'+index+'" data-field="'+field+'">'}
+function render(){
+ document.getElementById("eurLimit").value=state.eurLimit||"";
+ document.getElementById("eurRate").value=state.eurRate||"";
+ document.getElementById("usdRate").value=state.usdRate||"";
+ renderProducts();renderPromos();renderLimits();updateTop();setTimeout(validateVisual,0)
+}
+function renderProducts(){
+ var h="",p,i,s;
+ for(i=0;i<state.products.length;i++){p=state.products[i];s=num(p.avg)-num(p.price);
+ h+="<tr><td>"+inp(p.name,"p",i,"name")+"</td><td>"+inp(p.price,"p",i,"price","money")+"</td><td>"+inp(p.avg,"p",i,"avg","money")+"</td><td>"+inp(p.min,"p",i,"min","qty")+"</td><td>"+inp(p.max,"p",i,"max","qty")+'</td><td class="right" id="sav'+i+'">'+f2(s)+'</td><td class="center">'+availBtn('p',i,p.available)+'</td><td><button data-del="p" data-i="'+i+'">Удалить</button></td></tr>'}
+ document.querySelector("#products tbody").innerHTML=h;bindRows()
+}
+function renderPromos(){
+ var h="",p,i;
+ for(i=0;i<state.promos.length;i++){p=state.promos[i];
+ h+="<tr><td>"+inp(p.name,"c",i,"name")+"</td><td>"+inp(p.discount,"c",i,"discount","money")+"</td><td>"+inp(p.minSum,"c",i,"minSum","money")+"</td><td class=\"center\">"+availBtn('c',i,p.available)+'</td><td><button data-del="c" data-i="'+i+'">Удалить</button></td></tr>'}
+ document.querySelector("#promos tbody").innerHTML=h;bindRows()
+}
+function renderLimits(){
+ var h="",p,i,r;
+ for(i=0;i<state.limits.length;i++){p=state.limits[i];r=num(p.limit)-num(p.used);
+ h+="<tr><td>"+inp(p.name,"l",i,"name")+"</td><td>"+inp(p.limit,"l",i,"limit","money")+"</td><td>"+inp(p.used,"l",i,"used","money")+'</td><td class="right" id="rem'+i+'">'+f2(r)+'</td><td class="center">'+availBtn('l',i,p.available)+'</td><td><button data-del="l" data-i="'+i+'">Удалить</button></td></tr>'}
+ document.querySelector("#limits tbody").innerHTML=h;bindRows()
+}
+function arr(t){return t==="p"?state.products:t==="c"?state.promos:state.limits}
+function bindRows(){
+ var a=document.querySelectorAll("[data-type]"),i;
+ for(i=0;i<a.length;i++){a[i].oninput=rowInput;a[i].onblur=rowBlur;a[i].onkeydown=enterBlur}
+ var b=document.querySelectorAll("[data-del]");
+ for(i=0;i<b.length;i++)b[i].onclick=delRow;var c=document.querySelectorAll("[data-toggle]");for(i=0;i<c.length;i++)c[i].onclick=toggleAvail
+}
+function toggleAvail(e){var el=e.currentTarget,o=arr(el.dataset.toggle)[Number(el.dataset.i)];o.available=normAvail(o.available)==="да"?"нет":"да";save();render()}
+function rowInput(e){
+ var el=e.target,o=arr(el.dataset.type)[Number(el.dataset.index)];o[el.dataset.field]=el.value;updateCells();validateVisual();save()
+}
+function rowBlur(e){
+ var el=e.target,o=arr(el.dataset.type)[Number(el.dataset.index)],field=el.dataset.field;o[field]=el.value;
+ if(el.dataset.type==="p"&&(field==="price"||field==="avg")&&String(o.avg||"").trim()===""&&isFinite(num(o.price))){o.avg=o.price;var x=document.querySelector('[data-type="p"][data-index="'+el.dataset.index+'"][data-field="avg"]');if(x)x.value=o.avg}
+ if(el.dataset.type==="p"&&(field==="min"||field==="max")&&String(o.max||"").trim()===""&&isFinite(num(o.min))){o.max=o.min;var y=document.querySelector('[data-type="p"][data-index="'+el.dataset.index+'"][data-field="max"]');if(y)y.value=o.max}
+ if(el.dataset.type==="c"&&field==="available"){var z=String(o.available||"").trim().toLowerCase();o.available=(z===""||z==="0"||z==="нет")?"нет":"да";el.value=o.available}
+ updateCells();validateVisual();save()
+}
+function enterBlur(e){if(e.key==="Enter"||e.keyCode===13)e.target.blur()}
+function updateCells(){
+ var i,p,x;
+ for(i=0;i<state.products.length;i++){p=state.products[i];x=document.getElementById("sav"+i);if(x)x.textContent=f2(num(p.avg)-num(p.price))}
+ for(i=0;i<state.limits.length;i++){p=state.limits[i];x=document.getElementById("rem"+i);if(x)x.textContent=f2(num(p.limit)-num(p.used))}
+}
+function delRow(e){var t=e.currentTarget.dataset.del,i=Number(e.currentTarget.dataset.i);arr(t).splice(i,1);save();render()}
+function updateTop(){
+ var a=num(state.eurLimit),b=num(state.eurRate),c=num(state.usdRate);
+ document.getElementById("usdEq").textContent=isFinite(a)&&isFinite(b)&&isFinite(c)&&c>0?f2(a*b/c)+" $":"—";
+ document.getElementById("rateInfo").textContent=state.rateDate?"Дата курса: "+state.rateDate:""
+}
+function topBind(id,field){var el=document.getElementById(id);el.oninput=function(){state[field]=el.value;updateTop();validateVisual();save()};el.onkeydown=enterBlur}
+
+function mark(el,k,t){if(!el)return;el.classList.remove("field-error","field-ignore","field-ok");if(k)el.classList.add("field-"+k);el.title=t||""}
+function validateVisual(){var i,p,e,j,l,u,r,a;for(i=0;i<state.products.length;i++){p=state.products[i];e=document.querySelectorAll('[data-type="p"][data-index="'+i+'"]');if(normAvail(p.available)!=="да"){for(j=0;j<e.length;j++)mark(e[j],"ignore","Товар отключён полем Доступность.");continue}if(!String(p.name||"").trim()){for(j=0;j<e.length;j++)mark(e[j],"error","Для доступного товара требуется название.");continue}for(j=0;j<e.length;j++)mark(e[j],"ok","");var pr=num(p.price),av=num(p.avg),mn=num(p.min),mx=num(p.max);if(!isFinite(pr)||pr<0)mark(e[1],"error","Текущая цена: требуется неотрицательное число.");if(!isFinite(av)||av<0)mark(e[2],"error","Средняя цена: требуется неотрицательное число.");if(!isFinite(mn)||mn<0||Math.floor(mn)!==mn)mark(e[3],"error","Мин.: требуется целое неотрицательное число.");if(!isFinite(mx)||!isFinite(mn)||mx<mn||Math.floor(mx)!==mx)mark(e[4],"error","Макс.: требуется целое число не меньше Мин.")}for(i=0;i<state.promos.length;i++){p=state.promos[i];e=document.querySelectorAll('[data-type="c"][data-index="'+i+'"]');a=String(p.available||"").trim().toLowerCase();if(a==="нет"||a===""||a==="0"){for(j=0;j<e.length;j++)mark(e[j],"ignore","Промокод не участвует в текущем расчёте.");continue}for(j=0;j<e.length;j++)mark(e[j],"ok","");if(!isFinite(num(p.discount))||num(p.discount)<0)mark(e[1],"error","Скидка: требуется неотрицательное число.");if(!isFinite(num(p.minSum))||num(p.minSum)<0)mark(e[2],"error","Минимум: требуется неотрицательное число.")}for(i=0;i<state.limits.length;i++){p=state.limits[i];e=document.querySelectorAll('[data-type="l"][data-index="'+i+'"]');l=num(p.limit);u=num(p.used);r=l-u;if(normAvail(p.available)!=="да"){for(j=0;j<e.length;j++)mark(e[j],"ignore","Лимит отключён полем Доступность.");continue}if(!String(p.name||"").trim()){for(j=0;j<e.length;j++)mark(e[j],"error","Для доступного лимита требуется название.");continue}if(isFinite(r)&&r<=0){for(j=0;j<e.length;j++)mark(e[j],"ignore","Строка игнорируется: остаток не больше нуля.");continue}for(j=0;j<e.length;j++)mark(e[j],"ok","");if(!isFinite(l)||l<0)mark(e[1],"error","Лимит: требуется неотрицательное число.");if(!isFinite(u)||u<0)mark(e[2],"error","Использовано: требуется неотрицательное число.")}var eu=document.getElementById("eurLimit"),x=num(state.eurLimit);mark(eu,isFinite(x)&&x>0?"ok":"error",isFinite(x)&&x>0?"":"Лимит EUR должен быть положительным числом.")}
+
+function products(){
+ var z=[],i,p,pr,av,mn,mx;
+ for(i=0;i<state.products.length;i++){p=state.products[i];if(normAvail(p.available)!=="да")continue;if(!String(p.name).trim())throw Error("Товары → доступная строка "+(i+1)+": требуется название.");
+ pr=num(p.price);av=num(p.avg);mn=num(p.min);mx=num(p.max);
+ if(!isFinite(pr))throw Error("Товары → «"+p.name+"» → Текущая цена: требуется число.");if(!isFinite(av))throw Error("Товары → «"+p.name+"» → Средняя цена: требуется число.");if(!isFinite(mn))throw Error("Товары → «"+p.name+"» → Мин.: требуется целое число.");if(!isFinite(mx))throw Error("Товары → «"+p.name+"» → Макс.: требуется целое число.");
+ if(mn<0||mx<mn||Math.floor(mn)!==mn||Math.floor(mx)!==mx||pr<0||av<0)throw Error("Товары → «"+p.name+"»: цены должны быть неотрицательными, количества целыми, Макс. не меньше Мин.");
+ z.push({name:p.name,price:pr,avg:av,min:mn,max:mx,saving:av-pr})}return z
+}
+function promos(){
+ var z=[],i,p,d,m,a;
+ for(i=0;i<state.promos.length;i++){p=state.promos[i];if(!String(p.name).trim())continue;a=String(p.available||"").trim().toLowerCase();if(a==="нет"||a===""||a==="0")continue;
+ d=num(p.discount);m=num(p.minSum);if(!isFinite(d)||d<0)throw Error("Промокоды → «"+p.name+"» → Скидка: требуется неотрицательное число.");if(!isFinite(m)||m<0)throw Error("Промокоды → «"+p.name+"» → Минимум: требуется неотрицательное число.");z.push({name:p.name,discount:d,minSum:m})}return z
+}
+function limits(){
+ var z=[],i,p,l,u;
+ for(i=0;i<state.limits.length;i++){p=state.limits[i];if(normAvail(p.available)!=="да")continue;if(!String(p.name).trim())throw Error("Лимиты → доступная строка "+(i+1)+": требуется название.");l=num(p.limit);u=num(p.used);
+ if(isFinite(l)&&isFinite(u)&&l-u<=0)continue;if(!isFinite(l)||l<0)throw Error("Лимиты → «"+p.name+"» → Лимит: требуется неотрицательное число.");if(!isFinite(u)||u<0)throw Error("Лимиты → «"+p.name+"» → Использовано: требуется неотрицательное число.");z.push({name:p.name,remaining:l-u})}return z
+}
+
+
+function getActive(){
+ var P=products(),C=promos(),L=limits(),i,mandatory=0,totalCap=0;
+ if(!P.length)throw Error("Нет товаров, участвующих в расчёте.");
+ if(!C.length)throw Error("Нет доступных промокодов, участвующих в расчёте.");
+ if(!L.length)throw Error("Нет таможенных лимитов с положительным остатком.");
+ for(i=0;i<P.length;i++)mandatory+=P[i].price*P[i].min;
+ for(i=0;i<L.length;i++)totalCap+=L[i].remaining;
+ if(mandatory>totalCap+1e-9)throw Error("Минимально обязательная покупка "+f2(mandatory)+" $ превышает суммарный остаток таможенных лимитов "+f2(totalCap)+" $.");
+ return {P:P,C:C,L:L}
+}
+
+/* Сохраняем расчётную часть версии 1 по смыслу: полный перебор количеств,
+   распределений товаров по заказам промокодов и таможенным лимитам. */
+function enumerate(P,C,L){
+ var top=[],q=new Array(P.length),i;for(i=0;i<q.length;i++)q[i]=0;
+ function add(r){
+  top.push(r);top.sort(function(a,b){return b.benefit-a.benefit||b.qty-a.qty||b.cost-a.cost});
+  var u=[],seen={},j,s;for(j=0;j<top.length;j++){s=top[j].sig;if(!seen[s]){seen[s]=1;u.push(top[j])}if(u.length===5)break}top=u
+ }
+ function quantities(k,cost,sav,qty){
+  if(cost>sumCap(L)+1e-9)return;
+  if(k===P.length){allocate(q.slice(),cost,sav,qty);return}
+  var n;for(n=P[k].min;n<=P[k].max;n++){q[k]=n;quantities(k+1,cost+n*P[k].price,sav+n*P[k].saving,qty+n)}
+ }
+ function allocate(Q,cost,sav,qty){
+  var units=[];for(var p=0;p<P.length;p++)for(var n=0;n<Q[p];n++)units.push(p);
+  var orders=C.length+L.length,where=new Array(units.length);
+  function rec(u){
+   if(u===units.length){check();return}
+   for(var o=0;o<orders;o++){where[u]=o;rec(u+1)}
+  }
+  function check(){
+   var promoSum=new Array(C.length),limitSum=new Array(L.length),promoLimit=new Array(C.length),j;
+   for(j=0;j<C.length;j++){promoSum[j]=0;promoLimit[j]=-1}for(j=0;j<L.length;j++)limitSum[j]=0;
+   /* First assign each promo order to one limit. */
+   function assignPromo(c){
+    if(c===C.length){place();return}
+    promoLimit[c]=-1;assignPromo(c+1);
+    for(var l=0;l<L.length;l++){promoLimit[c]=l;assignPromo(c+1)}
+   }
+   function place(){
+    for(j=0;j<C.length;j++)promoSum[j]=0;for(j=0;j<L.length;j++)limitSum[j]=0;
+    var discount=0,usedPromos=[],u,pidx,o,lidx;
+    for(u=0;u<units.length;u++){pidx=units[u];o=where[u];
+     if(o<C.length){if(promoLimit[o]<0)return;promoSum[o]+=P[pidx].price;limitSum[promoLimit[o]]+=P[pidx].price}
+     else{lidx=o-C.length;limitSum[lidx]+=P[pidx].price}
+    }
+    for(j=0;j<L.length;j++)if(limitSum[j]>L[j].remaining+1e-9)return;
+    for(j=0;j<C.length;j++){if(promoLimit[j]>=0){if(promoSum[j]+1e-9<C[j].minSum)return;discount+=C[j].discount;usedPromos.push(j)}}
+    var sig=Q.join(",")+"|"+promoLimit.join(",");
+    add({q:Q.slice(),cost:cost,saving:sav,discount:discount,benefit:sav+discount,qty:qty,promoSum:promoSum.slice(),promoLimit:promoLimit.slice(),limitSum:limitSum.slice(),sig:sig})
+   }
+   assignPromo(0)
+  }
+  rec(0)
+ }
+ quantities(0,0,0,0);return top
+}
+function sumCap(L){var s=0;for(var i=0;i<L.length;i++)s+=L[i].remaining;return s}
+
+var calcWorker=null,calcWorkerUrl=null;
+
+function optimizedWorkerSource(){
+return `
+var EPS=1e-9,best=[],seenBest={},lastSnapshot=0;
+function cmp(a,b){return b.R-a.R||b.Ek-a.Ek||a.cost-b.cost||b.qty-a.qty}
+function betterThanCut(R,Ek,cost,qty){if(best.length<5)return true;var w=best[best.length-1];if(R>w.R+EPS)return true;if(R<w.R-EPS)return false;if(Ek>w.Ek+EPS)return true;if(Ek<w.Ek-EPS)return false;if(cost<w.cost-EPS)return true;if(cost>w.cost+EPS)return false;return qty>w.qty}
+function topSignature(q,selected,C){var kinds=[];for(var i=0;i<selected.length;i++){var c=C[selected[i]];kinds.push(c.minSum.toFixed(10)+"/"+c.discount.toFixed(10))}kinds.sort();return q.join(",")+"|"+kinds.join(",")}
+function snapshot(force){var now=Date.now();if(force||now-lastSnapshot>250){lastSnapshot=now;self.postMessage({type:"snapshot",results:best})}}
+function addBest(r){if(seenBest[r.sig])return;seenBest[r.sig]=1;best.push(r);best.sort(cmp);if(best.length>5)best.pop();snapshot(false)}
+function makeAssignments(C,L){
+ var out=[],a=new Array(C.length),need=new Array(L.length),lastByMin={},seen={};for(var i=0;i<need.length;i++)need[i]=0;
+ function canonical(){var sel=[],groups={},i,l,key,buckets,gk;for(i=0;i<C.length;i++)if(a[i]>=0)sel.push(i);if(!sel.length)return null;
+  for(l=0;l<L.length;l++){key=L[l].remaining.toFixed(10);if(!groups[key])groups[key]=[];buckets=[];for(i=0;i<C.length;i++)if(a[i]===l)buckets.push(C[i].minSum.toFixed(10));buckets.sort();groups[key].push(buckets.join(','))}
+  var parts=[];for(gk in groups){groups[gk].sort();parts.push(gk+':'+groups[gk].join(';'))}parts.sort();return sel.join(',')+'|'+parts.join('|')}
+ function rec(k){if(k===C.length){var sig=canonical();if(sig&&!seen[sig]){seen[sig]=1;var sel=[],zn=0,mt=0;for(var j=0;j<C.length;j++)if(a[j]>=0){sel.push(j);zn+=C[j].discount;mt+=C[j].minSum}out.push({assign:a.slice(),selected:sel,Zn:zn,Mtotal:mt})}return}
+  a[k]=-1;rec(k+1);
+  var mk=C[k].minSum.toFixed(10),lo=(lastByMin[mk]===undefined?0:lastByMin[mk]),old;
+  for(var l=lo;l<L.length;l++){if(need[l]+C[k].minSum>L[l].remaining+EPS)continue;a[k]=l;need[l]+=C[k].minSum;old=lastByMin[mk];lastByMin[mk]=l;rec(k+1);need[l]-=C[k].minSum;if(old===undefined)delete lastByMin[mk];else lastByMin[mk]=old}
+ }
+ rec(0);out.sort(function(x,y){return y.Zn-x.Zn||y.Mtotal-x.Mtotal});return out
+}
+function findPlacement(P,L,C,variant,q){
+ var selected=variant.selected,assign=variant.assign,S=selected.length,T=S+L.length;
+ var order=[],i,j;for(i=0;i<P.length;i++)if(q[i]>0)order.push(i);order.sort(function(a,b){return P[b].price-P[a].price});
+ var promoSum=new Array(S),limitSum=new Array(L.length),alloc=[];for(i=0;i<S;i++)promoSum[i]=0;for(i=0;i<L.length;i++)limitSum[i]=0;for(i=0;i<P.length;i++){alloc[i]=new Array(T);for(j=0;j<T;j++)alloc[i][j]=0}
+ var suffixCost=new Array(order.length+1);suffixCost[order.length]=0;for(i=order.length-1;i>=0;i--)suffixCost[i]=suffixCost[i+1]+q[order[i]]*P[order[i]].price;
+ function rec(pos){
+  var remCost=suffixCost[pos],def=0,free=0;for(i=0;i<S;i++)if(promoSum[i]<C[selected[i]].minSum)def+=C[selected[i]].minSum-promoSum[i];if(def>remCost+EPS)return false;for(i=0;i<L.length;i++)free+=L[i].remaining-limitSum[i];if(remCost>free+EPS)return false;
+  if(pos===order.length){for(i=0;i<L.length;i++)if(limitSum[i]>L[i].remaining+EPS)return false;for(i=0;i<S;i++)if(promoSum[i]+EPS<C[selected[i]].minSum)return false;return true}
+  var pi=order[pos],cnt=q[pi],price=P[pi].price,parts=new Array(T);for(i=0;i<T;i++)parts[i]=0;
+  function split(t,left){if(t===T-1){parts[t]=left;var changes=[],addByLimit=new Array(L.length);for(var zz=0;zz<L.length;zz++)addByLimit[zz]=0;for(var z=0;z<T;z++)if(parts[z]){var li=z<S?assign[selected[z]]:z-S,add=parts[z]*price;addByLimit[li]+=add;changes.push([z,li,add])}for(var zz=0;zz<L.length;zz++)if(limitSum[zz]+addByLimit[zz]>L[zz].remaining+EPS)return false;for(var z=0;z<changes.length;z++){var ch=changes[z];limitSum[ch[1]]+=ch[2];if(ch[0]<S)promoSum[ch[0]]+=ch[2];alloc[pi][ch[0]]=parts[ch[0]]}if(rec(pos+1))return true;for(var z=0;z<changes.length;z++){var ch=changes[z];limitSum[ch[1]]-=ch[2];if(ch[0]<S)promoSum[ch[0]]-=ch[2];alloc[pi][ch[0]]=0}return false}
+   for(var x=0;x<=left;x++){parts[t]=x;if(split(t+1,left-x))return true}parts[t]=0;return false}
+  return split(0,cnt)
+ }
+ if(!rec(0))return null;
+ var rows=[],ps=promoSum.slice(),ls=limitSum.slice();for(i=0;i<P.length;i++)for(j=0;j<T;j++)if(alloc[i][j]>0){var li=j<S?assign[selected[j]]:j-S;rows.push({product:P[i].name,price:P[i].price,qty:alloc[i][j],promo:j<S?C[selected[j]].name:'Без промокода',promoSum:j<S?ps[j]:alloc[i][j]*P[i].price,limit:L[li].name,limitSum:ls[li]})}return rows
+}
+self.onmessage=function(e){try{
+ var P=e.data.P,C=e.data.C,L=e.data.L,totalCap=0,maxLimit=0,i;for(i=0;i<L.length;i++){totalCap+=L[i].remaining;if(L[i].remaining>maxLimit)maxLimit=L[i].remaining}
+ var mandatoryCost=0,mandatoryEk=0,Emax=0,Bmax=0;for(i=0;i<P.length;i++){if(P[i].price>maxLimit+EPS&&P[i].min>0)throw Error('Товар «'+P[i].name+'» обязателен, но цена одной единицы превышает любой остаток таможенного лимита.');if(P[i].price>maxLimit+EPS)P[i].max=0;mandatoryCost+=P[i].price*P[i].min;mandatoryEk+=P[i].saving*P[i].min;Bmax+=P[i].price*P[i].max;Emax+=P[i].saving*P[i].min+Math.max(0,P[i].saving)*(P[i].max-P[i].min)}
+ if(mandatoryCost>totalCap+EPS)throw Error('Минимально обязательная покупка превышает суммарный остаток таможенных лимитов.');
+ C.sort(function(a,b){return b.minSum-a.minSum||b.discount-a.discount});
+ var variants=makeAssignments(C,L),total=variants.length;
+ for(var ai=0;ai<variants.length;ai++){
+  var v=variants[ai];if(ai%5===0){self.postMessage({type:'progress',done:ai,total:total});snapshot(false)}
+  if(v.Mtotal>Bmax+EPS)continue;
+  if(best.length>=5&&v.Zn+Emax<best[best.length-1].R-EPS)continue;
+  var items=[];for(i=0;i<P.length;i++)items.push(i);items.sort(function(a,b){var ra=P[a].price?P[a].saving/P[a].price:(P[a].saving>0?Infinity:0),rb=P[b].price?P[b].saving/P[b].price:(P[b].saving>0?Infinity:0);var pa=P[a].saving>0?0:1,pb=P[b].saving>0?0:1;return pa-pb||rb-ra||P[b].saving-P[a].saving});
+  var sufCost=new Array(items.length+1),sufEk=new Array(items.length+1);sufCost[items.length]=0;sufEk[items.length]=0;for(i=items.length-1;i>=0;i--){var p=P[items[i]],extra=p.max-p.min;sufCost[i]=sufCost[i+1]+extra*p.price;sufEk[i]=sufEk[i+1]+Math.max(0,p.saving)*extra}
+  var q=new Array(P.length);for(i=0;i<P.length;i++)q[i]=P[i].min;
+  function qrec(k,cost,ek,qty){
+   if(cost>totalCap+EPS)return;if(cost+sufCost[k]<v.Mtotal-EPS)return;if(best.length>=5&&ek+sufEk[k]+v.Zn<best[best.length-1].R-EPS)return;
+   if(k===items.length){var R=ek+v.Zn;if(!betterThanCut(R,ek,cost,qty))return;var sig=topSignature(q,v.selected,C);if(seenBest[sig])return;var rows=findPlacement(P,L,C,v,q);if(!rows)return;addBest({R:R,Ek:ek,Zn:v.Zn,cost:cost,qty:qty,q:q.slice(),rows:rows,sig:sig});return}
+   var pi=items[k],p=P[pi],extra=p.max-p.min,x;if(p.saving>0){for(x=extra;x>=0;x--){q[pi]=p.min+x;qrec(k+1,cost+x*p.price,ek+x*p.saving,qty+x)}}else{for(x=0;x<=extra;x++){q[pi]=p.min+x;qrec(k+1,cost+x*p.price,ek+x*p.saving,qty+x)}}q[pi]=p.min
+  }
+  var baseQty=0;for(i=0;i<P.length;i++)baseQty+=P[i].min;qrec(0,mandatoryCost,mandatoryEk,baseQty)
+ }
+ self.postMessage({type:'progress',done:total,total:total});snapshot(true);self.postMessage({type:'done',results:best})
+}catch(x){self.postMessage({type:'error',message:x.message||String(x)})}}
+;`}
+function calculate(){
+ if(calcWorker)return;
+ try{
+  var d=getActive(),blob=new Blob([optimizedWorkerSource()],{type:"application/javascript"});
+  calcWorkerUrl=URL.createObjectURL(blob);calcWorker=new Worker(calcWorkerUrl);
+  document.getElementById("calculate").disabled=true;document.getElementById("stopCalc").style.display="inline-block";
+  document.getElementById("progressWrap").style.display="block";document.getElementById("progressBar").style.width="0%";document.getElementById("progressText").textContent="Подготовка расчёта…";
+  document.getElementById("status").className="";document.getElementById("status").textContent="Расчёт выполняется…";
+  lastResults=[];lastCalcStatus="Расчёт выполняется";document.getElementById("results").innerHTML="";
+  calcStarted=performance.now();lastCalcSeconds=null;
+  if(calcTimer)clearInterval(calcTimer);
+  calcTimer=setInterval(updateCalcTime,100);updateCalcTime();
+  calcWorker.onmessage=function(e){
+   if(e.data.type==="snapshot"){lastResults=e.data.results||[];}
+   else if(e.data.type==="progress"){var pct=e.data.total?Math.round(100*e.data.done/e.data.total):0;document.getElementById("progressBar").style.width=pct+"%";document.getElementById("progressText").textContent="Проверка распределений промокодов: "+e.data.done+" из "+e.data.total+" ("+pct+"%)";}
+   else if(e.data.type==="done"){lastResults=e.data.results||[];lastCalcStatus="Расчёт завершён";var audit=renderResultsV1(lastResults);finishCalcTime();document.getElementById("status").className=audit.length?"danger":"ok";document.getElementById("status").textContent=(audit.length?"Расчёт завершён, но итоговый контроль обнаружил несоответствия. ":"Расчёт завершён. ")+"Сохранено результатов: "+lastResults.length+". Время: "+formatSeconds(lastCalcSeconds)+".";finishCalculation()}
+   else if(e.data.type==="error"){fail(Error(e.data.message));finishCalculation()}
+  };
+  calcWorker.onerror=function(e){fail(Error(e.message||"Ошибка расчёта."));finishCalculation()};
+  calcWorker.postMessage(d)
+ }catch(e){fail(e)}
+}
+function finishCalculation(){
+ if(calcWorker){calcWorker.terminate();calcWorker=null}if(calcWorkerUrl){URL.revokeObjectURL(calcWorkerUrl);calcWorkerUrl=null}
+ document.getElementById("calculate").disabled=false;document.getElementById("stopCalc").style.display="none";
+}
+function stopCalculation(){if(!calcWorker)return;finishCalcTime();lastCalcStatus="Прерван пользователем — результат может быть неоптимальным";finishCalculation();renderResultsV1(lastResults);document.getElementById("status").className="danger";document.getElementById("status").textContent="Расчёт прерван пользователем. Показаны лучшие результаты, найденные к моменту прерывания. Результат может быть неоптимальным. Время: "+formatSeconds(lastCalcSeconds)+".";document.getElementById("progressText").textContent="Расчёт прерван. Результат может быть неоптимальным."}
+function formatSeconds(v){if(v==null||!isFinite(v))return "—";if(v<60)return v.toFixed(1).replace(".",",")+" с";var m=Math.floor(v/60),ss=(v-m*60).toFixed(1).replace(".",",");return m+" мин "+ss+" с"}
+function updateCalcTime(){if(!calcStarted)return;var v=(performance.now()-calcStarted)/1000;document.getElementById("calcTime").textContent="Время расчёта: "+formatSeconds(v)}
+function finishCalcTime(){if(calcStarted){lastCalcSeconds=(performance.now()-calcStarted)/1000;calcStarted=0}if(calcTimer){clearInterval(calcTimer);calcTimer=null}document.getElementById("calcTime").textContent="Время расчёта: "+formatSeconds(lastCalcSeconds)}
+function auditResults(best){
+ var errors=[],P,C,L;try{P=products();C=promos();L=limits()}catch(e){return ["Контроль исходных данных невозможен: "+(e.message||e)]}
+ var pmap={},cmap={},lmap={},i,j,r,x,k,qty,calcEk,calcCost,calcZn,calcR,seenPromo,limTotals,promoTotals;
+ for(i=0;i<P.length;i++)pmap[P[i].name]=P[i];for(i=0;i<C.length;i++)cmap[C[i].name]=C[i];for(i=0;i<L.length;i++)lmap[L[i].name]=L[i];
+ for(i=0;i<best.length;i++){r=best[i];qty={};limTotals={};promoTotals={};seenPromo={};calcCost=0;
+  for(j=0;j<r.rows.length;j++){x=r.rows[j];qty[x.product]=(qty[x.product]||0)+Number(x.qty);calcCost+=Number(x.price)*Number(x.qty);limTotals[x.limit]=(limTotals[x.limit]||0)+Number(x.price)*Number(x.qty);if(x.promo!=="Без промокода")promoTotals[x.promo]=(promoTotals[x.promo]||0)+Number(x.price)*Number(x.qty)}
+  calcEk=0;for(k in pmap){var q=qty[k]||0;if(q<pmap[k].min||q>pmap[k].max)errors.push("Результат "+(i+1)+": товар «"+k+"», количество "+q+", допустимо "+pmap[k].min+"…"+pmap[k].max+".");calcEk+=q*pmap[k].saving}
+  for(k in qty)if(!pmap[k])errors.push("Результат "+(i+1)+": неизвестный или отключённый товар «"+k+"».");
+  for(k in limTotals){if(!lmap[k])errors.push("Результат "+(i+1)+": неизвестный или отключённый лимит «"+k+"».");else if(limTotals[k]>lmap[k].remaining+1e-7)errors.push("Результат "+(i+1)+": «"+k+"» = "+f2(limTotals[k])+" $, допустимо "+f2(lmap[k].remaining)+" $.")}
+  calcZn=0;for(k in promoTotals){if(!cmap[k])errors.push("Результат "+(i+1)+": неизвестный или отключённый промокод «"+k+"».");else{if(promoTotals[k]+1e-7<cmap[k].minSum)errors.push("Результат "+(i+1)+": промокод «"+k+"», сумма "+f2(promoTotals[k])+" $, требуется не менее "+f2(cmap[k].minSum)+" $.");calcZn+=cmap[k].discount}}
+  calcR=calcEk+calcZn;if(Math.abs(calcEk-r.Ek)>1e-6)errors.push("Результат "+(i+1)+": Эк = "+f2(r.Ek)+" $, контрольное значение "+f2(calcEk)+" $.");if(Math.abs(calcZn-r.Zn)>1e-6)errors.push("Результат "+(i+1)+": Зн = "+f2(r.Zn)+" $, контрольное значение "+f2(calcZn)+" $.");if(Math.abs(calcR-r.R)>1e-6)errors.push("Результат "+(i+1)+": Р = "+f2(r.R)+" $, контрольное значение "+f2(calcR)+" $.");if(Math.abs(calcCost-r.cost)>1e-6)errors.push("Результат "+(i+1)+": стоимость = "+f2(r.cost)+" $, контрольное значение "+f2(calcCost)+" $.")
+ }return errors
+}
+function renderResultsV1(best){
+ var out=document.getElementById("results"),h="",i,j,r,rows,x,audit=auditResults(best);
+ if(!best.length){out.innerHTML='<div class="result danger">Допустимых распределений не найдено.</div>';return audit}
+ h+='<div class="result '+(audit.length?'audit-error':'audit-ok')+'">'+(audit.length?'ВНИМАНИЕ! Контроль результатов обнаружил несоответствия:<br>'+audit.map(esc).join('<br>'):'Контроль результатов: ошибок не обнаружено.')+'</div>';
+ for(i=0;i<best.length;i++){
+  r=best[i];rows=r.rows.slice().sort(function(a,b){return a.limit.localeCompare(b.limit,"ru")||a.promo.localeCompare(b.promo,"ru")||a.product.localeCompare(b.product,"ru")});
+  var limitCount={},promoCount={};
+  for(j=0;j<rows.length;j++){
+   x=rows[j];limitCount[x.limit]=(limitCount[x.limit]||0)+1;
+   var pk=x.limit+"\u0001"+x.promo;promoCount[pk]=(promoCount[pk]||0)+1;
+  }
+  h+='<div class="result"><h3>Результат '+(i+1)+'</h3><b>Р = '+f2(r.R)+' $</b> &nbsp; Эк = '+f2(r.Ek)+' $ &nbsp; Зн = '+f2(r.Zn)+' $';
+  h+='<table><thead><tr><th>Товар</th><th>Текущая цена</th><th>Количество</th><th>Промокод</th><th>Сумма по промокоду</th><th>Таможенный лимит</th><th>Сумма по лимиту</th></tr></thead><tbody>';
+  var lastL=null,lastP=null;
+  for(j=0;j<rows.length;j++){
+   x=rows[j];var newL=x.limit!==lastL,newP=newL||x.promo!==lastP,pk=x.limit+"\u0001"+x.promo;
+   h+='<tr><td>'+esc(x.product)+'</td><td>'+f2(x.price)+'</td><td>'+x.qty+'</td>';
+   if(newP){h+='<td rowspan="'+promoCount[pk]+'">'+esc(x.promo)+'</td><td rowspan="'+promoCount[pk]+'">'+f2(x.promoSum)+'</td>'}
+   if(newL){h+='<td rowspan="'+limitCount[x.limit]+'">'+esc(x.limit)+'</td><td rowspan="'+limitCount[x.limit]+'">'+f2(x.limitSum)+'</td>'}
+   h+='</tr>';lastL=x.limit;lastP=x.promo;
+  }
+  h+='</tbody></table></div>';
+ }
+ out.innerHTML=h;return audit
+}
+function show(R,P,C,L){
+ var h="",r,i,j;if(!R.length){document.getElementById("results").innerHTML='<div class="result">Допустимых вариантов не найдено.</div>';return}
+ for(i=0;i<R.length;i++){r=R[i];h+='<div class="result"><h3>Вариант '+(i+1)+'</h3><p><b>Стоимость:</b> '+f2(r.cost)+' $ &nbsp; <b>Экономия товаров:</b> '+f2(r.saving)+' $ &nbsp; <b>Промокоды:</b> '+f2(r.discount)+' $ &nbsp; <b>Общая выгода:</b> '+f2(r.benefit)+' $</p><table><tr><th>Товар</th><th>Количество</th></tr>';
+ for(j=0;j<P.length;j++)if(r.q[j])h+="<tr><td>"+esc(P[j].name)+"</td><td>"+r.q[j]+"</td></tr>";h+="</table>";
+ h+="<table><tr><th>Промокод</th><th>Лимит</th><th>Сумма заказа</th></tr>";for(j=0;j<C.length;j++)if(r.promoLimit[j]>=0)h+="<tr><td>"+esc(C[j].name)+"</td><td>"+esc(L[r.promoLimit[j]].name)+"</td><td>"+f2(r.promoSum[j])+" $</td></tr>";h+="</table>";
+ h+="<table><tr><th>Лимит</th><th>Использовано</th><th>Остаток</th></tr>";for(j=0;j<L.length;j++)h+="<tr><td>"+esc(L[j].name)+"</td><td>"+f2(r.limitSum[j])+" $</td><td>"+f2(L[j].remaining-r.limitSum[j])+" $</td></tr>";h+="</table></div>"
+ }document.getElementById("results").innerHTML=h
+}
+function fail(e){document.getElementById("status").className="danger";document.getElementById("status").textContent=e.message||String(e);document.getElementById("results").innerHTML=""}
+
+
+function xmlEsc(v){return String(v==null?"":v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
+function xCell(v,type){return '<Cell><Data ss:Type="'+(type||"String")+'">'+xmlEsc(v)+'</Data></Cell>'}
+function xRow(a){var h="<Row>";for(var i=0;i<a.length;i++)h+=xCell(a[i][0],a[i][1]);return h+"</Row>"}
+function exportExcel(){
+ try{
+  var sheets=[],r,i,j,x;
+  var settings=[xRow([["Параметр"],["Значение"]]),xRow([["Версия программы"],["7.2"]]),xRow([["Лимит EUR"],[state.eurLimit]]),xRow([["EUR → UAH"],[state.eurRate]]),xRow([["USD → UAH"],[state.usdRate]]),xRow([["Дата курса НБУ"],[state.rateDate||""]]),xRow([["Время расчёта, с"],[lastCalcSeconds==null?"":lastCalcSeconds]]),xRow([["Статус расчёта"],[lastCalcStatus]])].join("");
+  sheets.push(['Настройки',settings]);
+  var p=xRow([["Название"],["Текущая цена, $"],["Средняя цена, $"],["Мин."],["Макс."],["Доступность"]]);
+  for(i=0;i<state.products.length;i++){r=state.products[i];p+=xRow([[r.name],[r.price],[r.avg],[r.min],[r.max],[normAvail(r.available)]])}sheets.push(["Товары",p]);
+  var c=xRow([["Название"],["Скидка, $"],["Минимум, $"],["Доступность"]]);
+  for(i=0;i<state.promos.length;i++){r=state.promos[i];c+=xRow([[r.name],[r.discount],[r.minSum],[r.available]])}sheets.push(["Промокоды",c]);
+  var l=xRow([["Название"],["Лимит, $"],["Использовано, $"],["Доступность"]]);
+  for(i=0;i<state.limits.length;i++){r=state.limits[i];l+=xRow([[r.name],[r.limit],[r.used],[normAvail(r.available)]])}sheets.push(["Таможенные лимиты",l]);
+  var q=xRow([["Результат"],["Р, $"],["Эк, $"],["Зн, $"],["Товар"],["Цена, $"],["Количество"],["Промокод"],["Сумма по промокоду, $"],["Таможенный лимит"],["Сумма по лимиту, $"]]);
+  for(i=0;i<lastResults.length;i++){r=lastResults[i];for(j=0;j<r.rows.length;j++){x=r.rows[j];q+=xRow([[i+1],[r.R],[r.Ek],[r.Zn],[x.product],[x.price],[x.qty],[x.promo],[x.promoSum],[x.limit],[x.limitSum]])}}sheets.push(["Результаты",q]);
+  var body='';for(i=0;i<sheets.length;i++)body+='<Worksheet ss:Name="'+xmlEsc(sheets[i][0])+'"><Table>'+sheets[i][1]+'</Table></Worksheet>';
+  var xml='<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">'+body+'</Workbook>';
+  var blob=new Blob(["\ufeff"+xml],{type:"application/vnd.ms-excel;charset=utf-8"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="AliExpress_данные.xml";document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(url)},1500);
+  document.getElementById("status").className="ok";document.getElementById("status").textContent="Данные экспортированы в файл Excel XML.";
+ }catch(e){fail(Error("Ошибка экспорта: "+(e.message||e)))}
+}
+function sheetRows(doc,name){
+ var ws=doc.getElementsByTagName("Worksheet"),i,j,rows,cells,k,out=[],vals,data;
+ for(i=0;i<ws.length;i++)if(ws[i].getAttribute("ss:Name")===name||ws[i].getAttribute("Name")===name){
+  rows=ws[i].getElementsByTagName("Row");
+  for(j=0;j<rows.length;j++){cells=rows[j].getElementsByTagName("Cell");vals=[];for(k=0;k<cells.length;k++){data=cells[k].getElementsByTagName("Data")[0];vals.push(data?data.textContent:"")}out.push(vals)}return out
+ }return []
+}
+function importExcelFile(file){
+ var rd=new FileReader();rd.onload=function(){
+  try{
+   var doc=new DOMParser().parseFromString(rd.result,"application/xml");if(doc.getElementsByTagName("parsererror").length)throw Error("Файл не распознан.");
+   var a=sheetRows(doc,"Настройки"),p=sheetRows(doc,"Товары"),c=sheetRows(doc,"Промокоды"),l=sheetRows(doc,"Таможенные лимиты"),q=sheetRows(doc,"Результаты"),i,map={};
+   for(i=1;i<a.length;i++)map[a[i][0]]=a[i][1]||"";
+   state.eurLimit=map["Лимит EUR"]||"";state.eurRate=map["EUR → UAH"]||"";state.usdRate=map["USD → UAH"]||"";state.rateDate=map["Дата курса НБУ"]||"";
+   state.products=[];for(i=1;i<p.length;i++)state.products.push({name:p[i][0]||"",price:p[i][1]||"",avg:p[i][2]||"",min:p[i][3]||"",max:p[i][4]||"",available:p[i].length>5?normAvail(p[i][5]):"да"});
+   state.promos=[];for(i=1;i<c.length;i++)state.promos.push({name:c[i][0]||"",discount:c[i][1]||"",minSum:c[i][2]||"",available:c[i][3]||""});
+   state.limits=[];for(i=1;i<l.length;i++)state.limits.push({name:l[i][0]||"",limit:l[i][1]||"",used:l[i][2]||"",available:l[i].length>3?normAvail(l[i][3]):"да"});
+   normalizeState();lastResults=[];var byRes={},ri,row,rr;for(i=1;i<q.length;i++){row=q[i];ri=Number(row[0]);if(!ri)continue;if(!byRes[ri])byRes[ri]={R:Number(row[1]),Ek:Number(row[2]),Zn:Number(row[3]),cost:0,qty:0,q:[],rows:[],sig:"import-"+ri};rr={product:row[4]||"",price:Number(row[5]),qty:Number(row[6]),promo:row[7]||"",promoSum:Number(row[8]),limit:row[9]||"",limitSum:Number(row[10])};byRes[ri].rows.push(rr);byRes[ri].cost+=rr.price*rr.qty;byRes[ri].qty+=rr.qty}for(ri=1;ri<=5;ri++)if(byRes[ri])lastResults.push(byRes[ri]);lastCalcSeconds=map["Время расчёта, с"]===""?null:Number(map["Время расчёта, с"]);lastCalcStatus=map["Статус расчёта"]||"Импортированы исходные данные";save();render();if(lastResults.length)renderResultsV1(lastResults);else document.getElementById("results").innerHTML="";document.getElementById("calcTime").textContent="Время расчёта: "+formatSeconds(lastCalcSeconds);
+   document.getElementById("status").className="ok";document.getElementById("status").textContent=lastResults.length?"Исходные данные и сохранённые результаты импортированы из Excel.":"Исходные данные импортированы из Excel.";
+  }catch(e){fail(Error("Ошибка импорта: "+(e.message||e)))}
+ };rd.readAsText(file,"utf-8")
+}
+function rate(){
+ document.getElementById("status").textContent="Получение курса НБУ...";
+ function get(code,cb){var x=new XMLHttpRequest();x.open("GET","https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode="+code+"&json",true);x.onreadystatechange=function(){if(x.readyState===4){if(x.status>=200&&x.status<300){try{var d=JSON.parse(x.responseText);cb(null,d[0])}catch(e){cb(e)}}else cb(Error("HTTP "+x.status))}};x.onerror=function(){cb(Error("network"))};x.send()}
+ get("EUR",function(e,d){if(e){fail(Error("Курс НБУ получить не удалось. Курсы можно ввести вручную."));return}state.eurRate=String(d.rate);state.rateDate=d.exchangedate||"";get("USD",function(e2,d2){if(!e2)state.usdRate=String(d2.rate);save();render();document.getElementById("status").className=e2?"danger":"ok";document.getElementById("status").textContent=e2?"EUR получен, USD введите вручную.":"Курс НБУ обновлён."})})
+}
+function init(){
+ load();render();topBind("eurLimit","eurLimit");topBind("eurRate","eurRate");topBind("usdRate","usdRate");
+ document.getElementById("addProduct").onclick=function(){state.products.push({name:"",price:"",avg:"",min:"0",max:"",available:"да"});save();render()};
+ document.getElementById("addPromo").onclick=function(){state.promos.push({name:"",discount:"",minSum:"",available:"да"});save();render()};
+ document.getElementById("addLimit").onclick=function(){if(state.limits.length>=3){fail(Error("Можно использовать не более 3 таможенных лимитов."));return}state.limits.push({name:"",limit:"",used:"0",available:"да"});save();render()};
+ document.getElementById("calculate").onclick=calculate;document.getElementById("stopCalc").onclick=stopCalculation;document.getElementById("rateBtn").onclick=rate;
+ document.getElementById("exportExcel").onclick=exportExcel;document.getElementById("importExcel").onclick=function(){document.getElementById("excelFile").click()};document.getElementById("excelFile").onchange=function(){if(this.files&&this.files[0])importExcelFile(this.files[0]);this.value=""};
+ document.getElementById("clearSaved").onclick=function(){if(confirm("Очистить сохранённые данные и вернуть тестовый пример?")){try{localStorage.removeItem(KEY)}catch(e){}state=clone(DEFAULT);render();document.getElementById("results").innerHTML="";save()}};
+}
+
+window.addEventListener("beforeunload",save);document.addEventListener("visibilitychange",function(){if(document.hidden)save()});window.onload=init;
+})();
+</script>
+</body></html>
